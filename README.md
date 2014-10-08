@@ -13,8 +13,7 @@ Manage binary files with git.
 
 ### Install
 
-``store-largefile.py`` と ``load-largefile.py`` にパスを通してください。
-`pip install path.py` もしておいてください。
+gits3をパスが通った場所等に配置してください。
 
 ### S3 Configuration
 
@@ -24,7 +23,7 @@ Manage binary files with git.
 
 ```
 [DEFAULT]
-awskey = "Access Key Id:Secret Access Key"
+awskey = Access Key Id:Secret Access Key
 bucket = バケット名
 ```
 
@@ -34,8 +33,8 @@ bucket = バケット名
 
 ```
 [filter "s3"]
-    clean = gits3 store
-    smudge = gits3 load
+    clean = /path/to/gits3 store
+    smudge = /path/to/gits3 load
     required
 ```
 
@@ -51,3 +50,25 @@ git リポジトリの中に `.gitattributes` っていうファイルを作っ�
 ```
 
 これで設定したファイルは largefile フィルターを通るようになります.
+
+
+
+### アップロードの並列処理
+
+ローカルモードを有効にしs3アップロードを停止します。
+`~/.gitconfig` か `.git/config` に、次のように設定してください
+
+```
+[filter "s3"]
+    clean = /path/to/gits3 -local=true store
+    smudge = /path/to/gits3 load
+    required
+```
+
+通常のgit操作を一通り行った後に、
+以下のコマンド実行でまとめてs3にアップロードします
+
+```
+$ gits3 -n=<並列数> upload
+```
+
