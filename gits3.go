@@ -2,17 +2,21 @@ package main
 
 import (
 	"crypto/sha1"
+	"errors"
 	"flag"
 	"fmt"
-	"github.com/msbranco/goconfig"
 	"io/ioutil"
-	"launchpad.net/goamz/aws"
-	"launchpad.net/goamz/s3"
 	"log"
 	"os"
 	"os/user"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
+
+	"github.com/msbranco/goconfig"
+	"launchpad.net/goamz/aws"
+	"launchpad.net/goamz/s3"
 )
 
 var (
@@ -200,6 +204,90 @@ func upload() {
 	filepath.Walk(datadir, store)
 }
 
+type result struct {
+	path string
+	hash string
+	err  error
+}
+
+func walkFiles(done <-chan struct{}, root string) (<-chan string, <-chan error) {
+	paths := make(chan string)
+	errc := make(chan error, 1)
+	go func() {
+		// Close the paths channel after Walk returns.
+		defer close(paths)
+		// No select needed for this send, since errc is buffered.
+		errc <- filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return err
+			}
+			if info.IsDir() {
+				return nil
+			}
+			select {
+			case paths <- path:
+			case <-done:
+				return errors.New("walk canceled")
+			}
+			return nil
+		})
+	}()
+	return paths, errc
+}
+
+func pathToS3(done <-chan struct{}, paths <-chan string, c chan<- result) {
+	for path := range paths {
+		data, err := ioutil.ReadFile(path)
+		if err != nil {
+			c <- result{path, "", err}
+			return
+		}
+		sha1hex := calcSha1String(data)
+		select {
+		case c <- result{path, sha1hex, storeToS3(sha1hex, data)}:
+		case <-done:
+			return
+		}
+	}
+}
+
+func ParallelUpload(parallel int) error {
+
+	root := filepath.Join(assetDir(), "data")
+
+	done := make(chan struct{})
+	defer close(done)
+
+	paths, errc := walkFiles(done, root)
+
+	// Start a fixed number of goroutines to read and digest files.
+	c := make(chan result)
+	var wg sync.WaitGroup
+	wg.Add(parallel)
+	for i := 0; i < parallel; i++ {
+		go func() {
+			pathToS3(done, paths, c)
+			wg.Done()
+		}()
+	}
+
+	go func() {
+		wg.Wait()
+		close(c)
+	}()
+
+	for r := range c {
+		log.Printf("%v", r)
+	}
+
+	// Check whether the Walk failed.
+	if err := <-errc; err != nil {
+		return err
+	}
+
+	return nil
+}
+
 const usageStr = `Usage:
   gits3 [options] store < input-file > shafile
   gits3 [options] load < shafile > output-file
@@ -212,20 +300,24 @@ func usage() {
 	flag.PrintDefaults()
 }
 
+var parallel = 1
+
 func main() {
 	log.SetPrefix("gits3:")
+	flag.IntVar(&parallel, "n", 1, "Level of parallelism. NUM is specified as an integer, the default is 1.")
 	flag.Parse()
-	if flag.NArg() != 1 {
+	if flag.NArg() < 1 {
 		usage()
 		os.Exit(1)
 	}
+	runtime.GOMAXPROCS(parallel)
 	switch flag.Args()[0] {
 	case "store":
 		store()
 	case "load":
 		load()
 	case "upload":
-		upload()
+		ParallelUpload(parallel)
 	default:
 		log.Fatal("Invalid argument.")
 	}
